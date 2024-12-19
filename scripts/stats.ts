@@ -12,26 +12,44 @@ interface Stat {
   timestamp: number;
 }
 
-async function getAliases(): Promise<Record<string, string>> {
-  const aliases: Record<string, string> = {};
-  const process = Deno.run({
-    cmd: ["sh", "-c", "alias"],
-    stdout: "piped",
-    stderr: "piped",
-  });
-
-  const output = await process.output();
-  const decoder = new TextDecoder();
-  const aliasOutput = decoder.decode(output);
-
-  for (const line of aliasOutput.split("\n")) {
-    const [alias, command] = line.split("=");
-    if (alias && command) {
-      aliases[alias.trim()] = command.replace(/['"]/g, "").trim();
-    }
+async function readStdin(): Promise<string | null> {
+  if (Deno.stdin.isTerminal()) {
+    return null;
   }
 
-  process.close();
+  const buffer = new Uint8Array(1024);
+  let result = '';
+  
+  while (true) {
+    const n = await Deno.stdin.read(buffer);
+    if (n === null) break;
+    result += new TextDecoder().decode(buffer.subarray(0, n));
+  }
+  return result;
+}
+
+async function getAliases(): Promise<Record<string, string>> {
+  const aliases: Record<string, string> = {};
+  
+  try {
+    const input = await readStdin();
+    if (!input) {
+      console.log("No aliases provided. Run the script with: `alias | deno run -A stats.ts` for better results.");
+      return aliases;
+    }
+
+    const lines = input.split('\n');
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const [alias, cmd] = line.split('=');
+      if (alias && cmd) {
+        aliases[alias.trim()] = cmd.replace(/['"]/g, '').trim();
+      }
+    }
+  } catch (error) {
+    console.error("Failed to read aliases from stdin:", error);
+  }
+
   return aliases;
 }
 
@@ -45,23 +63,15 @@ async function getAtuinStats(dbFilePath: string): Promise<Stat[]> {
 
     const db = new Database(dbFilePath);
     const stats: Stat[] = [];
-    const query = db.prepare(
-      "SELECT command, cwd, deleted_at, duration, exit, hostname, id, session, timestamp FROM history"
-    );
+    const query = db.prepare(`
+      SELECT command, cwd, deleted_at, duration, exit, hostname, id, session, timestamp 
+      FROM history
+    `);
 
     for (const row of query.all()) {
-      stats.push({
-        command: row.command,
-        cwd: row.cwd,
-        deleted_at: row.deleted_at,
-        duration: row.duration,
-        exit: row.exit,
-        hostname: row.hostname,
-        id: row.id,
-        session: row.session,
-        timestamp: row.timestamp,
-      });
+      stats.push(row as Stat);
     }
+
     db.close();
     return stats;
   } catch (error) {
