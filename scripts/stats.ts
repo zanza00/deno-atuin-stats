@@ -1,4 +1,5 @@
 import { Database } from "jsr:@db/sqlite@0.11";
+import { parse } from "jsr:@std/flags@0.215.0";
 
 interface Stat {
   command: string;
@@ -81,6 +82,29 @@ async function getAtuinStats(dbFilePath: string): Promise<Stat[]> {
   }
 }
 
+function processCommand(command: string, aliases: Record<string, string>): string {
+  const words = command.split(" ");
+  let processedCommand = words[0];
+  
+  // Check if the first word is an alias
+  if (aliases[words[0]]) {
+    const aliasedCommand = aliases[words[0]].split(" ");
+    processedCommand = aliasedCommand[0];
+    
+    // If the alias is a compound command (e.g., "git status"), include the subcommand
+    if (aliasedCommand.length > 1) {
+      processedCommand += " " + aliasedCommand[1];
+    }
+  }
+  
+  // Add the subcommand if present in the original command
+  if (words.length > 1) {
+    processedCommand += " " + words[1];
+  }
+  
+  return processedCommand;
+}
+
 async function getTopCommands(dbFilePath: string, topN: number) {
   const aliases = await getAliases();
   const atuinStats = await getAtuinStats(dbFilePath);
@@ -88,14 +112,11 @@ async function getTopCommands(dbFilePath: string, topN: number) {
   const commandCount: Record<string, number> = {};
 
   allStats.forEach((stat) => {
-    let firstWord = stat.command.split(" ")[0];
-    if (aliases[firstWord]) {
-      firstWord = aliases[firstWord].split(" ")[0];
-    }
-    if (commandCount[firstWord]) {
-      commandCount[firstWord]++;
+    const processedCommand = processCommand(stat.command, aliases);
+    if (commandCount[processedCommand]) {
+      commandCount[processedCommand]++;
     } else {
-      commandCount[firstWord] = 1;
+      commandCount[processedCommand] = 1;
     }
   });
 
@@ -109,7 +130,47 @@ async function getTopCommands(dbFilePath: string, topN: number) {
   });
 }
 
-const dbFilePath = "/Users/spicciani/.local/share/atuin/history.db";
-const topN = 10;
-console.log(`Reading stats from Atuin database in ${dbFilePath}`);
-getTopCommands(dbFilePath, topN);
+async function findDatabasePath(): Promise<string> {
+  // Check command line arguments
+  const args = parse(Deno.args);
+  if (args.db) {
+    return args.db;
+  }
+
+  // Check environment variable
+  const envPath = Deno.env.get("ATUIN_DB_PATH");
+  if (envPath) {
+    return envPath;
+  }
+
+  // Check common locations
+  const home = Deno.env.get("HOME");
+  const commonPaths = [
+    `${home}/.local/share/atuin/history.db`,
+    `${home}/Library/Application Support/atuin/history.db`, // macOS
+    `${home}/.config/atuin/history.db`,
+  ];
+
+  for (const path of commonPaths) {
+    try {
+      const fileInfo = await Deno.stat(path);
+      if (fileInfo.isFile) {
+        return path;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error("Could not find Atuin database. Please specify with --db flag or ATUIN_DB_PATH environment variable");
+}
+
+try {
+  const dbFilePath = await findDatabasePath();
+  const topN = 10;
+  console.log(`Reading stats from Atuin database in ${dbFilePath}`);
+  await getTopCommands(dbFilePath, topN);
+} catch (error) {
+  console.error(error.message);
+  Deno.exit(1);
+}
